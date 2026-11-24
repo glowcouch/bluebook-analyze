@@ -194,7 +194,7 @@ def load_regions(path, top_frac, bottom_frac):
     return {"top": [0, 0, 1, top_frac], "bottom": [0, 1 - bottom_frac, 1, bottom_frac]}
 
 
-def scan_video(path, sample_fps, regions, debug_crops):
+def scan_video(path, sample_fps, regions, debug_crops, always_ocr=False):
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         sys.exit(f"Could not open {path}")
@@ -228,10 +228,20 @@ def scan_video(path, sample_fps, regions, debug_crops):
             dumped = True
 
         # Only re-OCR the bottom bar when it visibly changed (or last read failed).
-        small = cv2.resize(cv2.cvtColor(bottom, cv2.COLOR_BGR2GRAY), (64, 8)).astype(
-            int
+        # A one-digit change touches only a tiny fraction of a tight crop, so count the
+        # fraction of strongly-changed pixels rather than the mean difference.
+        gray = cv2.cvtColor(bottom, cv2.COLOR_BGR2GRAY)
+        small = cv2.resize(
+            gray,
+            (256, max(8, round(256 * gray.shape[0] / gray.shape[1]))),
+            interpolation=cv2.INTER_AREA,
         )
-        changed = last_small is None or np.abs(small - last_small).mean() > 2.0
+        changed = (
+            always_ocr
+            or last_small is None
+            or last_small.shape != small.shape
+            or (cv2.absdiff(small, last_small) > 40).mean() > 0.003
+        )
         if changed:
             q = parse_question(ocr(bottom))
             if q is not None:
@@ -353,6 +363,11 @@ def main():
     )
     ap.add_argument("--out", default="question_times.csv", help="CSV of every visit")
     ap.add_argument(
+        "--always-ocr",
+        action="store_true",
+        help="OCR the bottom bar on every sample (slower, skips change detection)",
+    )
+    ap.add_argument(
         "--debug-crops",
         action="store_true",
         help="save debug_top.png / debug_bottom.png from the first frame",
@@ -364,7 +379,9 @@ def main():
     else:
         regions = load_regions(args.regions, args.top_frac, args.bottom_frac)
 
-    samples = scan_video(args.video, args.sample_fps, regions, args.debug_crops)
+    samples = scan_video(
+        args.video, args.sample_fps, regions, args.debug_crops, args.always_ocr
+    )
     segs = build_segments(samples, args.confirm)
     if not segs:
         sys.exit(
